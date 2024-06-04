@@ -55,6 +55,8 @@
 //#define USE_sparse
 
 
+extern bool is_curr_degraded;
+extern double HTH_eigen_val_thres;
 namespace esekfom {
 
 using namespace Eigen;
@@ -1931,6 +1933,16 @@ public:
 					P_ = L_ - K_x.template block<n, 12>(0, 0) * P_.template block<12, n>(0, 0);
 				//}
 				solve_time += omp_get_wtime() - solve_start;
+				Matrix<double, 12, 12> H_T_H_ = (h_x_.transpose() * h_x_);
+				Eigen::EigenSolver<Matrix<double, 12, 12>> eigen_solver(H_T_H_);
+				Eigen::VectorXcd eig_val = eigen_solver.eigenvalues();
+				if (eig_val.real()(5) < HTH_eigen_val_thres) {
+					// std::cout << "Eigen values:";
+					// for (int j = 0; j < 12; ++j)
+					// 	std::cout << eig_val.real()(j) << " ";
+					// std::cout << std::endl;
+					is_curr_degraded = true;
+				}
 				return;
 			}
 			solve_time += omp_get_wtime() - solve_start;

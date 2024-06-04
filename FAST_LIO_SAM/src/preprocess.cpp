@@ -247,6 +247,10 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
       double range = pl_orig.points[i].x * pl_orig.points[i].x + pl_orig.points[i].y * pl_orig.points[i].y + pl_orig.points[i].z * pl_orig.points[i].z;
       
       if (range < (blind * blind)) continue;
+      if (pl_orig.points[i].x > filter_x_lower && pl_orig.points[i].x < filter_x_upper && \
+        pl_orig.points[i].y > filter_y_lower && pl_orig.points[i].y < filter_y_upper && \
+        pl_orig.points[i].z > filter_z_lower && pl_orig.points[i].z < filter_z_upper)
+        continue;
       
       Eigen::Vector3d pt_vec;
       PointType added_pt;

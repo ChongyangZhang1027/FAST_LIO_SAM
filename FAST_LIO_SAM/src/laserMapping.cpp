@@ -134,6 +134,7 @@ condition_variable sig_buffer;
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
 
+double filter_x_lower = 0, filter_x_upper = 0, filter_y_lower = 0, filter_y_upper = 0, filter_z_lower = 0, filter_z_upper = 0;
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
@@ -144,6 +145,10 @@ int iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidN
 bool point_selected_surf[100000] = {0}; // 是否为平面特征点
 bool lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
+bool is_curr_degraded = false;
+std::vector<int> degraded_poses(100, -1);
+int idx_degraded_pose = 0;
+double HTH_eigen_val_thres;
 
 vector<vector<int>> pointSearchInd_surf;
 vector<BoxPointType> cub_needrm; // ikd-tree中，地图需要移除的包围盒序列
@@ -768,6 +773,11 @@ void saveKeyFramesAndFactor()
     // 索引
     thisPose3D.intensity = cloudKeyPoses3D->size(); //  使用intensity作为该帧点云的index
     cloudKeyPoses3D->push_back(thisPose3D);         //  新关键帧帧放入队列中
+    if (is_curr_degraded) {
+        degraded_poses[idx_degraded_pose] = cloudKeyPoses3D->size()-1;
+        idx_degraded_pose = (idx_degraded_pose + 1) % degraded_poses.size();
+        is_curr_degraded = false;
+    }
 
     // cloudKeyPoses6D加入当前帧位姿
     thisPose6D.x = thisPose3D.x;
@@ -994,8 +1004,12 @@ void performLoopClosure()
     mtx.unlock();
 
     // 当前关键帧索引，候选闭环匹配帧索引
-    int loopKeyCur;
+    int loopKeyCur = copy_cloudKeyPoses3D->size() - 1;
     int loopKeyPre;
+    for (int idx = 0; idx < degraded_poses.size(); ++idx) {
+        if (degraded_poses[idx] == loopKeyCur)
+            return;
+    }
     // 在历史关键帧中查找与当前关键帧距离最近的关键帧集合，选择时间相隔较远的一帧作为候选闭环帧
     if (detectLoopClosureDistance(&loopKeyCur, &loopKeyPre) == false)
     {
@@ -2138,6 +2152,13 @@ int main(int argc, char **argv)
     nh.param<double>("mapping/b_gyr_cov", b_gyr_cov, 0.0001);
     nh.param<double>("mapping/b_acc_cov", b_acc_cov, 0.0001);
     nh.param<double>("preprocess/blind", p_pre->blind, 0.01);
+    nh.param<double>("filter_x_lower",filter_x_lower,0);
+    nh.param<double>("filter_x_upper",filter_x_upper,0);
+    nh.param<double>("filter_y_lower",filter_y_lower,0);
+    nh.param<double>("filter_y_upper",filter_y_upper,0);
+    nh.param<double>("filter_z_lower",filter_z_lower,0);
+    nh.param<double>("filter_z_upper",filter_z_upper,0);
+    nh.param<double>("HTH_eigen_val_thres",HTH_eigen_val_thres,30);
     nh.param<int>("preprocess/lidar_type", p_pre->lidar_type, AVIA);
     nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
     nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);

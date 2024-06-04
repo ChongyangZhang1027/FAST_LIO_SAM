@@ -97,7 +97,7 @@ generate_messages(
 )
 
 catkin_package(
-  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs message_runtime
+  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs message_runtime message_generation
   DEPENDS EIGEN3 PCL GTSAM
   INCLUDE_DIRS
 )
@@ -109,5 +109,9 @@ catkin_package(
 add_library(ikd_Tree include/ikd-Tree/ikd_Tree.cpp)
 add_library(preprocess  src/preprocess.cpp)
 add_executable(fastlio_sam_mapping src/laserMapping.cpp)
+add_dependencies(fastlio_sam_mapping ${${PROJECT_NAME}_EXPORTTED_TARGETS}
+                                   ${catkin_EXPORTED_TARGETS}
+                                   ${PROJECT_NAME}_generate_messages_cpp
+                                   ${PROJECT_NAME}_gencpp)
 target_link_libraries(fastlio_sam_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${PYTHON_LIBRARIES}  ${GeographicLib_LIBRARIES} ikd_Tree preprocess gtsam) 
 target_include_directories(fastlio_sam_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
