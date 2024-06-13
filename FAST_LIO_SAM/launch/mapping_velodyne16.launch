@@ -10,7 +10,7 @@
     <param name="max_iteration" type="int" value="3" />
     <param name="HTH_eigen_val_thres" type="double" value="50"/>
     <param name="is_front_backend_tightly_coupled" type="bool" value="1"/>
-  <!--	单帧内，畸变纠正后降采样的分辨率-->
+  <!--	the down-sample resolution of a single frame after motion compensation deskew-->
     <param name="filter_size_surf" type="double" value="0.5" />
     <param name="filter_size_map" type="double" value="0.5" />
     <param name="cube_side_length" type="double" value="1000" />

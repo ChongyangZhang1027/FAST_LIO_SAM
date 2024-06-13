@@ -73,4 +73,4 @@ recontructKdTree: true
 
 # Export settings
 savePCD: true                        # https://github.com/TixiaoShan/LIO-SAM/issues/3
-savePCDDirectory: "/home/zcy/thesis/catkin_fastlio_sam_khw/src/FAST_LIO_SAM/PCD/"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
+savePCDDirectory: "/home/zcy/thesis/catkin_fastlio_sam_zcy/src/FAST_LIO_SAM/FAST_LIO_SAM/PCD/"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation

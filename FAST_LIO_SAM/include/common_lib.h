@@ -52,7 +52,7 @@ M3F Eye3f(M3F::Identity());
 V3D Zero3d(0, 0, 0);
 V3F Zero3f(0, 0, 0);
 
-// 储存一帧lidar数据及imu数据序列
+// store one frame of lidar and corresponding imu data
 struct MeasureGroup     // Lidar data and imu dates for the curent process
 {
     MeasureGroup()

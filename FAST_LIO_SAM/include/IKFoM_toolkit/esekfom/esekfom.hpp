@@ -1626,7 +1626,7 @@ public:
 		dyn_share.converge = true;
 		int t = 0;
 
-        //获取上一次的状态和协方差矩阵
+        // get the state and covariance matrix of last epoch
 		state x_propagated = x_;
 		cov P_propagated = P_;
 		int dof_Measurement; 
@@ -1638,7 +1638,7 @@ public:
 		for(int i=-1; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;	
-			h_dyn_share(x_, dyn_share); //计算残差与雅可比
+			h_dyn_share(x_, dyn_share); // calculate residual and Jacobian
 
 			if(! dyn_share.valid)
 			{
@@ -1652,16 +1652,16 @@ public:
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, 12> h_x_ = dyn_share.h_x; // partial differention matrices
 			#endif
 			double solve_start = omp_get_wtime();
-			dof_Measurement = h_x_.rows(); // 观测方程个数m
+			dof_Measurement = h_x_.rows(); // observation function number m
 			vectorized_state dx;
-			x_.boxminus(dx, x_propagated); //获取误差dx
+			x_.boxminus(dx, x_propagated); // get state error dx
 			dx_new = dx;
 			
 			
-			// 迭代过程不更新协方差矩阵，迭代后更新
+			// during each iteration, the covariance matrix is not updated, it is updated in the end
 			P_ = P_propagated;
 
-            //更新协方差矩阵的传播,更新dx_new
+            // update the propagation of covariance matrix, update dx_new
 			Matrix<scalar_type, 3, 3> res_temp_SO3;
 			MTK::vect<3, scalar_type> seg_SO3;
 			for (std::vector<std::pair<int, int> >::iterator it = x_.SO3_state.begin(); it != x_.SO3_state.end(); it++) {
@@ -1718,7 +1718,7 @@ public:
 			}
 			*/
 
-            // 如果状态量维度大于观测方程 n > m，不满秩
+            // if the dimension of state is larger than the number of obs functions
 			if(n > dof_Measurement)
 			{
 			//#ifdef USE_sparse
@@ -1742,7 +1742,7 @@ public:
 				h_x_cur.col(11) = h_x_.col(11);
 				*/
 
-                // 重新计算增益矩阵K
+                // re-calculate the gain matrix K
 				Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> K_ = P_ * h_x_cur.transpose() * (h_x_cur * P_ * h_x_cur.transpose()/R + Eigen::Matrix<double, Dynamic, Dynamic>::Identity(dof_Measurement, dof_Measurement)).inverse()/R;
 				K_h = K_ * dyn_share.h; // K × h
 				K_x = K_ * h_x_cur; // K * H
@@ -1809,7 +1809,7 @@ public:
 				*/
 				cov P_inv = P_temp.inverse(); // (H_T_H + P^-1)^-1
 				//std::cout << "line 1781" << std::endl;
-				K_h = P_inv. template block<n, 12>(0, 0) * h_x_.transpose() * dyn_share.h; // (H_T_H + P^-1)^-1 * H^T * h(残差) = K * h
+				K_h = P_inv. template block<n, 12>(0, 0) * h_x_.transpose() * dyn_share.h; // (H_T_H + P^-1)^-1 * H^T * h(residuals) = K * h
 				//std::cout << "line 1780" << std::endl;
 				//cov HTH_cur = cov::Zero();
 				//HTH_cur. template block<12, 12>(0, 0) = HTH;
@@ -1820,9 +1820,9 @@ public:
 			}
 
 			//K_x = K_ * h_x_;
-			Matrix<scalar_type, n, 1> dx_ = K_h + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; //误差增量后验 K*h + (K*H - I) dx
+			Matrix<scalar_type, n, 1> dx_ = K_h + (K_x - Matrix<scalar_type, n, n>::Identity()) * dx_new; // K*h + (K*H - I) dx
 			state x_before = x_;
-			x_.boxplus(dx_); //根据计算得到的误差增量后验，更新状态量
+			x_.boxplus(dx_); // update the state
 			dyn_share.converge = true;
 			for(int i = 0; i < n ; i++)
 			{
@@ -1839,7 +1839,7 @@ public:
 				dyn_share.converge = true;
 			}
 
-            // 最后一次迭代更新协方差矩阵
+            // the covariance matrix of the last iteration
 			if(t > 1 || i == maximum_iter - 1)
 			{
 				L_ = P_;
