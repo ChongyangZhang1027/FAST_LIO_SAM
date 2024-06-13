@@ -109,6 +109,10 @@ struct PointXYZIRPYT
     float pitch;
     float yaw;
     double time;
+    float qw;
+    float qx;
+    float qy;
+    float qz;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW   
 } EIGEN_ALIGN16;                    
 

@@ -145,8 +145,10 @@ int iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidN
 bool point_selected_surf[100000] = {0}; // 是否为平面特征点
 bool lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
-bool is_curr_degraded = false;
-std::vector<int> degraded_poses(100, -1);
+bool is_curr_degraded = false, is_benefit_from_lc = false;
+bool is_front_backend_tightly_coupled = false;
+std::vector<int> degraded_poses(300, -1);
+double t_isam_start, t_isam_end;
 int idx_degraded_pose = 0;
 double HTH_eigen_val_thres;
 
@@ -188,6 +190,7 @@ vect3 pos_lid; // world系下lidar坐标
 
 nav_msgs::Path path;
 nav_msgs::Odometry odomAftMapped;
+nav_msgs::Odometry loopConstrain;
 geometry_msgs::Quaternion geoQuat;
 geometry_msgs::PoseStamped msg_body_pose;
 
@@ -258,7 +261,7 @@ pcl::VoxelGrid<PointType> downSizeFilterCorner;
 pcl::VoxelGrid<PointType> downSizeFilterICP;
 pcl::VoxelGrid<PointType> downSizeFilterSurroundingKeyPoses; // for surrounding key poses of scan-to-map optimization
 
-float transformTobeMapped[6]; //  当前帧的位姿(world系下)
+float transformTobeMapped[10]; //  当前帧的位姿(world系下)
 
 std::mutex mtx;
 std::mutex mtxLoopInfo;
@@ -280,7 +283,7 @@ Eigen::MatrixXd poseCovariance;
 ros::Publisher pubLaserCloudSurround;
 ros::Publisher pubOptimizedGlobalMap ;           //   发布最后优化的地图
 
-bool    recontructKdTree = false;
+bool reconstructKdTree = false;
 int updateKdtreeCount = 0 ;        //  每100次更新一次
 bool visulize_IkdtreeMap = false;            //  visual iktree submap
 
@@ -330,11 +333,10 @@ void updatePath(const PointTypePose &pose_in)
     pose_stamped.pose.position.x =  pose_in.x;
     pose_stamped.pose.position.y = pose_in.y;
     pose_stamped.pose.position.z =  pose_in.z;
-    tf::Quaternion q = tf::createQuaternionFromRPY(pose_in.roll, pose_in.pitch, pose_in.yaw);
-    pose_stamped.pose.orientation.x = q.x();
-    pose_stamped.pose.orientation.y = q.y();
-    pose_stamped.pose.orientation.z = q.z();
-    pose_stamped.pose.orientation.w = q.w();
+    pose_stamped.pose.orientation.w = pose_in.qw;
+    pose_stamped.pose.orientation.x = pose_in.qx;
+    pose_stamped.pose.orientation.y = pose_in.qy;
+    pose_stamped.pose.orientation.z = pose_in.qz;
 
     globalPath.poses.push_back(pose_stamped);
 }
@@ -351,16 +353,21 @@ pcl::PointCloud<PointType>::Ptr transformPointCloud(pcl::PointCloud<PointType>::
     
    // 注意：lio_sam 中的姿态用的euler表示，而fastlio存的姿态角是旋转矢量。而 pcl::getTransformation是将euler_angle 转换到rotation_matrix 不合适，注释
   // Eigen::Affine3f transCur = pcl::getTransformation(transformIn->x, transformIn->y, transformIn->z, transformIn->roll, transformIn->pitch, transformIn->yaw);
-    Eigen::Isometry3d T_b_lidar(state_point.offset_R_L_I  );       //  获取  body2lidar  外参
-    T_b_lidar.pretranslate(state_point.offset_T_L_I);        
+    Eigen::Isometry3d T_lidar_b(state_point.offset_R_L_I  );       //  获取  body2lidar  外参
+    T_lidar_b.pretranslate(state_point.offset_T_L_I);        
+    // Eigen::Affine3f T_w_b_ = pcl::getTransformation(transformIn->x, transformIn->y, transformIn->z, transformIn->roll, transformIn->pitch, transformIn->yaw);
+    // Eigen::Affine3f T_w_b_ = pclPointToAffine3f(PointTypePose(*transformIn));
+    Eigen::Quaternionf q(transformIn->qw, transformIn->qx, transformIn->qy, transformIn->qz);
+    Eigen::Vector3f t(transformIn->x, transformIn->y, transformIn->z);
+    Eigen::Affine3f T_b_w_ = Eigen::Affine3f::Identity();
+    T_b_w_.translate(t);
+    T_b_w_.rotate(q);
+    Eigen::Isometry3d T_b_w ;          //   body2world  
+    T_b_w.matrix() = T_b_w_.matrix().cast<double>();
 
-    Eigen::Affine3f T_w_b_ = pcl::getTransformation(transformIn->x, transformIn->y, transformIn->z, transformIn->roll, transformIn->pitch, transformIn->yaw);
-    Eigen::Isometry3d T_w_b ;          //   world2body  
-    T_w_b.matrix() = T_w_b_.matrix().cast<double>();
+    Eigen::Isometry3d  T_lidar_w  =  T_b_w * T_lidar_b  ;           //  T_w_lidar  转换矩阵
 
-    Eigen::Isometry3d  T_w_lidar  =  T_w_b * T_b_lidar  ;           //  T_w_lidar  转换矩阵
-
-    Eigen::Isometry3d transCur = T_w_lidar;        
+    Eigen::Isometry3d transCur = T_lidar_w;        
 
 #pragma omp parallel for num_threads(numberOfCores)
     for (int i = 0; i < cloudSize; ++i)
@@ -378,9 +385,11 @@ pcl::PointCloud<PointType>::Ptr transformPointCloud(pcl::PointCloud<PointType>::
  * 位姿格式变换
  */
 gtsam::Pose3 pclPointTogtsamPose3(PointTypePose thisPoint)
-{
-    return gtsam::Pose3(gtsam::Rot3::RzRyRx(double(thisPoint.roll), double(thisPoint.pitch), double(thisPoint.yaw)),
-                        gtsam::Point3(double(thisPoint.x), double(thisPoint.y), double(thisPoint.z)));
+{   
+    gtsam::Quaternion q(thisPoint.qw, thisPoint.qx, thisPoint.qy, thisPoint.qz);
+    return gtsam::Pose3(gtsam::Rot3(q), gtsam::Point3(double(thisPoint.x), double(thisPoint.y), double(thisPoint.z)));
+    // return gtsam::Pose3(gtsam::Rot3::RzRyRx(double(thisPoint.roll), double(thisPoint.pitch), double(thisPoint.yaw)),
+    //                     gtsam::Point3(double(thisPoint.x), double(thisPoint.y), double(thisPoint.z)));
 }
 
 /**
@@ -388,7 +397,15 @@ gtsam::Pose3 pclPointTogtsamPose3(PointTypePose thisPoint)
  */
 gtsam::Pose3 trans2gtsamPose(float transformIn[])
 {
-    return gtsam::Pose3(gtsam::Rot3::RzRyRx(transformIn[0], transformIn[1], transformIn[2]),
+    gtsam::Quaternion q(transformIn[9], transformIn[6], transformIn[7], transformIn[8]);
+    return gtsam::Pose3(gtsam::Rot3(q), gtsam::Point3(transformIn[3], transformIn[4], transformIn[5]));
+    // return gtsam::Pose3(gtsam::Rot3::RzRyRx(transformIn[0], transformIn[1], transformIn[2]),
+    //                     gtsam::Point3(transformIn[3], transformIn[4], transformIn[5]));
+}
+
+gtsam::Pose3 trans2gtsamPoseInit(float transformIn[])
+{
+    return gtsam::Pose3(gtsam::Rot3::RzRyRx(0, 0, 0),
                         gtsam::Point3(transformIn[3], transformIn[4], transformIn[5]));
 }
 
@@ -397,7 +414,13 @@ gtsam::Pose3 trans2gtsamPose(float transformIn[])
  */
 Eigen::Affine3f pclPointToAffine3f(PointTypePose thisPoint)
 {
-    return pcl::getTransformation(thisPoint.x, thisPoint.y, thisPoint.z, thisPoint.roll, thisPoint.pitch, thisPoint.yaw);
+    Eigen::Quaternionf q(thisPoint.qw, thisPoint.qx, thisPoint.qy, thisPoint.qz);
+    Eigen::Vector3f t(thisPoint.x, thisPoint.y, thisPoint.z);
+    Eigen::Affine3f T_ = Eigen::Affine3f::Identity();
+    T_.translate(t);
+    T_.rotate(q);
+    return T_;
+    // return pcl::getTransformation(thisPoint.x, thisPoint.y, thisPoint.z, thisPoint.roll, thisPoint.pitch, thisPoint.yaw);
 }
 
 /**
@@ -405,7 +428,13 @@ Eigen::Affine3f pclPointToAffine3f(PointTypePose thisPoint)
  */
 Eigen::Affine3f trans2Affine3f(float transformIn[])
 {
-    return pcl::getTransformation(transformIn[3], transformIn[4], transformIn[5], transformIn[0], transformIn[1], transformIn[2]);
+    Eigen::Quaternionf q(transformIn[9], transformIn[6], transformIn[7], transformIn[8]);
+    Eigen::Vector3f t(transformIn[3], transformIn[4], transformIn[5]);
+    Eigen::Affine3f T_ = Eigen::Affine3f::Identity();
+    T_.translate(t);
+    T_.rotate(q);
+    return T_;
+    // return pcl::getTransformation(transformIn[3], transformIn[4], transformIn[5], transformIn[0], transformIn[1], transformIn[2]);
 }
 
 /**
@@ -420,6 +449,10 @@ PointTypePose trans2PointTypePose(float transformIn[])
     thisPose6D.roll = transformIn[0];
     thisPose6D.pitch = transformIn[1];
     thisPose6D.yaw = transformIn[2];
+    thisPose6D.qw = transformIn[9];
+    thisPose6D.qx = transformIn[6];
+    thisPose6D.qy = transformIn[7];
+    thisPose6D.qz = transformIn[8];
     return thisPose6D;
 }
 
@@ -506,6 +539,12 @@ void getCurPose(state_ikfom cur_state)
     transformTobeMapped[3] = cur_state.pos(0);          //  x
     transformTobeMapped[4] = cur_state.pos(1);          //   y
     transformTobeMapped[5] = cur_state.pos(2);          // z
+    Eigen::Quaternionf q(cur_state.rot.w(), cur_state.rot.x(), cur_state.rot.y(), cur_state.rot.z());
+    q.normalize();
+    transformTobeMapped[6] = q.x();
+    transformTobeMapped[7] = q.y();
+    transformTobeMapped[8] = q.z();
+    transformTobeMapped[9] = q.w();
 }
 
 /**
@@ -741,6 +780,7 @@ void saveKeyFramesAndFactor()
     // GPS因子 (UTM -> WGS84)
     addGPSFactor();
     // 闭环因子 (rs-loop-detect)  基于欧氏距离的检测
+    t_isam_start = omp_get_wtime();
     addLoopFactor();
     // 执行优化
     isam->update(gtSAMgraph, initialEstimate);
@@ -752,7 +792,9 @@ void saveKeyFramesAndFactor()
         isam->update();
         isam->update();
         isam->update();
+        is_benefit_from_lc = true;
     }
+    t_isam_end = omp_get_wtime();
     // update之后要清空一下保存的因子图，注：历史数据不会清掉，ISAM保存起来了
     gtSAMgraph.resize(0);
     initialEstimate.clear();
@@ -761,49 +803,61 @@ void saveKeyFramesAndFactor()
     PointTypePose thisPose6D;
     gtsam::Pose3 latestEstimate;
 
-    // 优化结果
-    isamCurrentEstimate = isam->calculateBestEstimate();
-    // 当前帧位姿结果
-    latestEstimate = isamCurrentEstimate.at<gtsam::Pose3>(isamCurrentEstimate.size() - 1);
+    // ESKF状态和方差  更新
+    state_ikfom state_updated = kf.get_x(); //  获取cur_pose (还没修正)
+
+    //  更新状态量
+    // if(lidar_end_time - ((int)lidar_end_time/1000)*1000 < 577) {
+    if(is_front_backend_tightly_coupled) {
+        isamCurrentEstimate = isam->calculateBestEstimate();
+        poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size() - 1);
+
+        latestEstimate = isamCurrentEstimate.at<gtsam::Pose3>(isamCurrentEstimate.size() - 1);
+        Eigen::Vector3d pos(latestEstimate.translation().x(), latestEstimate.translation().y(), latestEstimate.translation().z());
+        gtsam::Quaternion q(latestEstimate.rotation().toQuaternion());
+        q.normalize();
+
+        state_updated.pos = pos;
+        state_updated.rot = q;
+        if (q.w() * state_updated.rot.w() <= 0  && q.x() * state_updated.rot.x() <= 0 && \
+            q.y() * state_updated.rot.y() <= 0  && q.z() * state_updated.rot.z() <= 0) {
+            state_updated.rot = Eigen::Quaterniond(-q.w(), -q.x(), -q.y(), -q.z());
+        } else {
+            state_updated.rot = q;
+        }
+        state_point = state_updated; // 对state_point进行更新，state_point可视化用到
+        kf.change_x(state_updated);  //  对cur_pose 进行isam2优化后的修正
+    }
 
     // cloudKeyPoses3D加入当前帧位置
-    thisPose3D.x = latestEstimate.translation().x();
-    thisPose3D.y = latestEstimate.translation().y();
-    thisPose3D.z = latestEstimate.translation().z();
-    // 索引
+    thisPose3D.x = state_updated.pos(0);
+    thisPose3D.y = state_updated.pos(1);
+    thisPose3D.z = state_updated.pos(2);
     thisPose3D.intensity = cloudKeyPoses3D->size(); //  使用intensity作为该帧点云的index
     cloudKeyPoses3D->push_back(thisPose3D);         //  新关键帧帧放入队列中
+
+    // cloudKeyPoses6D加入当前帧位姿
+    thisPose6D.x = state_updated.pos(0);
+    thisPose6D.y = state_updated.pos(1);
+    thisPose6D.z = state_updated.pos(2);
+    thisPose6D.intensity = thisPose3D.intensity;
+
+    Eigen::Vector3d eulerAngle = state_updated.rot.matrix().eulerAngles(2,1,0);        //  yaw pitch roll  单位：弧度
+    thisPose6D.roll = eulerAngle(2);
+    thisPose6D.pitch = eulerAngle(1);
+    thisPose6D.yaw = eulerAngle(0);
+    thisPose6D.time = lidar_end_time;
+    thisPose6D.qw = state_updated.rot.w();
+    thisPose6D.qx = state_updated.rot.x();
+    thisPose6D.qy = state_updated.rot.y();
+    thisPose6D.qz = state_updated.rot.z();
+    cloudKeyPoses6D->push_back(thisPose6D);
+
     if (is_curr_degraded) {
         degraded_poses[idx_degraded_pose] = cloudKeyPoses3D->size()-1;
         idx_degraded_pose = (idx_degraded_pose + 1) % degraded_poses.size();
         is_curr_degraded = false;
     }
-
-    // cloudKeyPoses6D加入当前帧位姿
-    thisPose6D.x = thisPose3D.x;
-    thisPose6D.y = thisPose3D.y;
-    thisPose6D.z = thisPose3D.z;
-    thisPose6D.intensity = thisPose3D.intensity;
-    thisPose6D.roll = latestEstimate.rotation().roll();
-    thisPose6D.pitch = latestEstimate.rotation().pitch();
-    thisPose6D.yaw = latestEstimate.rotation().yaw();
-    thisPose6D.time = lidar_end_time;
-    cloudKeyPoses6D->push_back(thisPose6D);
-
-    // 位姿协方差
-    poseCovariance = isam->marginalCovariance(isamCurrentEstimate.size() - 1);
-
-    // ESKF状态和方差  更新
-    state_ikfom state_updated = kf.get_x(); //  获取cur_pose (还没修正)
-    Eigen::Vector3d pos(latestEstimate.translation().x(), latestEstimate.translation().y(), latestEstimate.translation().z());
-    Eigen::Quaterniond q = EulerToQuat(latestEstimate.rotation().roll(), latestEstimate.rotation().pitch(), latestEstimate.rotation().yaw());
-
-    //  更新状态量
-    state_updated.pos = pos;
-    state_updated.rot =  q;
-    state_point = state_updated; // 对state_point进行更新，state_point可视化用到
-    // if(aLoopIsClosed == true )
-    kf.change_x(state_updated);  //  对cur_pose 进行isam2优化后的修正
 
     // TODO:  P的修正有待考察，按照yanliangwang的做法，修改了p，会跑飞
     // esekfom::esekf<state_ikfom, 12, input_ikfom>::cov P_updated = kf.get_P(); // 获取当前的状态估计的协方差矩阵
@@ -828,8 +882,8 @@ void saveKeyFramesAndFactor()
     updatePath(thisPose6D); //  可视化update后的path
 }
 
-void recontructIKdTree(){
-    if(recontructKdTree  &&  updateKdtreeCount >  0){
+void reconstructIKdTree(){
+    if(reconstructKdTree  &&  updateKdtreeCount >  0){
         /*** if path is too large, the rvis will crash ***/
         pcl::KdTreeFLANN<PointType>::Ptr kdtreeGlobalMapPoses(new pcl::KdTreeFLANN<PointType>());
         pcl::PointCloud<PointType>::Ptr subMapKeyPoses(new pcl::PointCloud<PointType>());
@@ -906,12 +960,25 @@ void correctPoses()
             cloudKeyPoses6D->points[i].roll = isamCurrentEstimate.at<gtsam::Pose3>(i).rotation().roll();
             cloudKeyPoses6D->points[i].pitch = isamCurrentEstimate.at<gtsam::Pose3>(i).rotation().pitch();
             cloudKeyPoses6D->points[i].yaw = isamCurrentEstimate.at<gtsam::Pose3>(i).rotation().yaw();
+            gtsam::Quaternion q = isamCurrentEstimate.at<gtsam::Pose3>(i).rotation().toQuaternion();
+            q.normalize();
+            if (q.w() * cloudKeyPoses6D->points[i].qw < 0) {
+                cloudKeyPoses6D->points[i].qw = -q.w();
+                cloudKeyPoses6D->points[i].qx = -q.x();
+                cloudKeyPoses6D->points[i].qy = -q.y();
+                cloudKeyPoses6D->points[i].qz = -q.z();
+            } else {
+                cloudKeyPoses6D->points[i].qw = q.w();
+                cloudKeyPoses6D->points[i].qx = q.x();
+                cloudKeyPoses6D->points[i].qy = q.y();
+                cloudKeyPoses6D->points[i].qz = q.z();
+            }
 
             // 更新里程计轨迹
             updatePath(cloudKeyPoses6D->points[i]);
         }
         // 清空局部map， reconstruct  ikdtree submap
-        recontructIKdTree();
+        reconstructIKdTree();
         ROS_INFO("ISMA2 Update");
         aLoopIsClosed = false;
     }
@@ -1016,6 +1083,10 @@ void performLoopClosure()
         return;
     }
 
+    for (int idx = 0; idx < degraded_poses.size(); ++idx) {
+        if (degraded_poses[idx] == loopKeyPre)
+            return;
+    }
     // 提取
     pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>()); //  cue keyframe
     pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>()); //   history keyframe submap
@@ -1065,16 +1136,23 @@ void performLoopClosure()
     Eigen::Affine3f correctionLidarFrame;
     correctionLidarFrame = icp.getFinalTransformation();
 
+    pcl::getTranslationAndEulerAngles(correctionLidarFrame, x, y, z, roll, pitch, yaw); //  获取上一帧 相对 当前帧的 位姿
+    Eigen::Quaterniond qq = EulerToQuat(roll, pitch, yaw);
+    std::cout << "relative pos " << x << " " << y << " " << z << std::endl;
+    std::cout << "relative att " << roll*180/3.1415 << " " << pitch*180/3.1415 << " " << yaw *180/3.1415 << std::endl;
     // 闭环优化前当前帧位姿
     Eigen::Affine3f tWrong = pclPointToAffine3f(copy_cloudKeyPoses6D->points[loopKeyCur]);
     // 闭环优化后当前帧位姿
     Eigen::Affine3f tCorrect = correctionLidarFrame * tWrong;
     pcl::getTranslationAndEulerAngles(tCorrect, x, y, z, roll, pitch, yaw); //  获取上一帧 相对 当前帧的 位姿
-    gtsam::Pose3 poseFrom = gtsam::Pose3(gtsam::Rot3::RzRyRx(roll, pitch, yaw), gtsam::Point3(x, y, z));
+
+    Eigen::Matrix3d rotm = tCorrect.rotation().cast<double>();
+    gtsam::Pose3 poseFrom = gtsam::Pose3(gtsam::Rot3(rotm), gtsam::Point3(x, y, z));
     // 闭环匹配帧的位姿
     gtsam::Pose3 poseTo = pclPointTogtsamPose3(copy_cloudKeyPoses6D->points[loopKeyPre]);
     gtsam::Vector Vector6(6);
     float noiseScore = icp.getFitnessScore() ; //  loop_clousre  noise from icp
+    noiseScore *= 3;
     Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
     gtsam::noiseModel::Diagonal::shared_ptr constraintNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
     std::cout << "loopNoiseQueue   =   " << noiseScore << std::endl;
@@ -1677,10 +1755,45 @@ void set_posestamp(T &out)
     out.pose.position.x = state_point.pos(0);
     out.pose.position.y = state_point.pos(1);
     out.pose.position.z = state_point.pos(2);
-    out.pose.orientation.x = geoQuat.x;
-    out.pose.orientation.y = geoQuat.y;
-    out.pose.orientation.z = geoQuat.z;
-    out.pose.orientation.w = geoQuat.w;
+    out.pose.orientation.x = state_point.rot.x();
+    out.pose.orientation.y = state_point.rot.y();
+    out.pose.orientation.z = state_point.rot.z();
+    out.pose.orientation.w = state_point.rot.w();
+}
+
+void publish_loop_constrain(const ros::Publisher &pubLoopConstrain) 
+{
+    if (loopIndexQueue.empty())
+            return;
+
+    // loop closure queue
+    for (int i = 0; i < (int)loopIndexQueue.size(); ++i)
+    {
+        // loop nodes
+        int indexFrom = loopIndexQueue[i].first; //   cur
+        int indexTo = loopIndexQueue[i].second;  //    pre
+        // pose transform
+        gtsam::Pose3 poseBetween = loopPoseQueue[i];
+        gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
+        loopConstrain.header.frame_id = "loop_constrain";
+        loopConstrain.child_frame_id = std::to_string(cloudKeyPoses6D->points[indexTo].time);
+        loopConstrain.header.stamp = ros::Time().fromSec(cloudKeyPoses6D->points[indexFrom].time); // ros::Time().fromSec(lidar_end_time);
+        loopConstrain.pose.pose.position.x = poseBetween.x();
+        loopConstrain.pose.pose.position.y = poseBetween.y();
+        loopConstrain.pose.pose.position.z = poseBetween.z();
+        gtsam::Rot3 R_loop = poseBetween.rotation();
+        gtsam::Quaternion q_loop = R_loop.toQuaternion();
+        loopConstrain.pose.pose.orientation.w = q_loop.w();
+        loopConstrain.pose.pose.orientation.x = q_loop.x();
+        loopConstrain.pose.pose.orientation.y = q_loop.y();
+        loopConstrain.pose.pose.orientation.z = q_loop.z();
+        pubLoopConstrain.publish(loopConstrain);
+    }
+
+    loopIndexQueue.clear();
+    loopPoseQueue.clear();
+    loopNoiseQueue.clear();
+    aLoopIsClosed = true;
 }
 
 void publish_odometry(const ros::Publisher &pubOdomAftMapped)
@@ -1689,7 +1802,13 @@ void publish_odometry(const ros::Publisher &pubOdomAftMapped)
     odomAftMapped.child_frame_id = "body";
     odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time); // ros::Time().fromSec(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
-    pubOdomAftMapped.publish(odomAftMapped);
+    odomAftMapped.twist.twist.linear.x = state_point.vel(0);
+    odomAftMapped.twist.twist.linear.y = state_point.vel(1);
+    odomAftMapped.twist.twist.linear.z = state_point.vel(2);
+    if (is_benefit_from_lc) {
+        odomAftMapped.child_frame_id = "loop";
+        is_benefit_from_lc = false;
+    }
     auto P = kf.get_P();
     for (int i = 0; i < 6; i++)
     {
@@ -1701,6 +1820,7 @@ void publish_odometry(const ros::Publisher &pubOdomAftMapped)
         odomAftMapped.pose.covariance[i * 6 + 4] = P(k, 1);
         odomAftMapped.pose.covariance[i * 6 + 5] = P(k, 2);
     }
+    pubOdomAftMapped.publish(odomAftMapped);
 
     static tf::TransformBroadcaster br;
     tf::Transform transform;
@@ -2159,6 +2279,7 @@ int main(int argc, char **argv)
     nh.param<double>("filter_z_lower",filter_z_lower,0);
     nh.param<double>("filter_z_upper",filter_z_upper,0);
     nh.param<double>("HTH_eigen_val_thres",HTH_eigen_val_thres,30);
+    nh.param<bool>("is_front_backend_tightly_coupled",is_front_backend_tightly_coupled,false);
     nh.param<int>("preprocess/lidar_type", p_pre->lidar_type, AVIA);
     nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
     nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);
@@ -2216,7 +2337,7 @@ int main(int argc, char **argv)
     nh.param<bool>("visulize_IkdtreeMap", visulize_IkdtreeMap, false);
 
     // reconstruct ikdtree 
-    nh.param<bool>("recontructKdTree", recontructKdTree, false);
+    nh.param<bool>("reconstructKdTree", reconstructKdTree, false);
 
     // savMap
     nh.param<bool>("savePCD", savePCD, false);
@@ -2293,6 +2414,7 @@ int main(int argc, char **argv)
     ros::Publisher pubLaserCloudEffect = nh.advertise<sensor_msgs::PointCloud2>("/cloud_effected", 100000);         //  no used
     ros::Publisher pubLaserCloudMap = nh.advertise<sensor_msgs::PointCloud2>("/Laser_map", 100000);                    //  no used
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/Odometry", 100000);
+    ros::Publisher pubLoopConstrain = nh.advertise<nav_msgs::Odometry>("/Loop", 100000);
     ros::Publisher pubPath = nh.advertise<nav_msgs::Path>("/path", 1e00000);
 
     ros::Publisher pubPathUpdate = nh.advertise<nav_msgs::Path>("fast_lio_sam/path_update", 100000);                   //  isam更新后的path
@@ -2434,10 +2556,10 @@ int main(int argc, char **argv)
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I; // world系下lidar坐标
-            geoQuat.x = state_point.rot.coeffs()[0];                                // world系下当前imu的姿态四元数
-            geoQuat.y = state_point.rot.coeffs()[1];
-            geoQuat.z = state_point.rot.coeffs()[2];
-            geoQuat.w = state_point.rot.coeffs()[3];
+            geoQuat.x = state_point.rot.x();                                // world系下当前imu的姿态四元数
+            geoQuat.y = state_point.rot.y();
+            geoQuat.z = state_point.rot.z();
+            geoQuat.w = state_point.rot.w();
 
             double t_update_end = omp_get_wtime();
 
@@ -2453,6 +2575,7 @@ int main(int argc, char **argv)
             correctPoses();
             /******* Publish odometry *******/
             publish_odometry(pubOdomAftMapped);
+            // publish_loop_constrain(pubLoopConstrain);
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
             map_incremental();
@@ -2503,7 +2626,7 @@ int main(int argc, char **argv)
                 s_plot9[time_log_counter] = aver_time_consu;
                 s_plot10[time_log_counter] = add_point_size;
                 time_log_counter++;
-                printf("[ mapping ]: time: IMU + Map + Input Downsample: %0.6f ave match: %0.6f ave solve: %0.6f  ave ICP: %0.6f  map incre: %0.6f ave total: %0.6f icp: %0.6f construct H: %0.6f \n", t1 - t0, aver_time_match, aver_time_solve, t3 - t1, t5 - t3, aver_time_consu, aver_time_icp, aver_time_const_H_time);
+                printf("[ mapping ]: time: %.4f IMU + Map + Input Downsample: %0.6f ave match: %0.6f ave solve: %0.6f  ave ICP: %0.6f  map incre: %0.6f ave total: %0.6f icp: %0.6f construct H: %0.6f isam: %.6f\n", lidar_end_time, t1 - t0, aver_time_match, aver_time_solve, t3 - t1, t5 - t3, aver_time_consu, aver_time_icp, aver_time_const_H_time, t_isam_end - t_isam_start);
                 ext_euler = SO3ToEuler(state_point.offset_R_L_I);
                 fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " " << euler_cur.transpose() << " " << state_point.pos.transpose() << " " << ext_euler.transpose() << " " << state_point.offset_T_L_I.transpose() << " " << state_point.vel.transpose()
                          << " " << state_point.bg.transpose() << " " << state_point.ba.transpose() << " " << state_point.grav << " " << feats_undistort->points.size() << endl;

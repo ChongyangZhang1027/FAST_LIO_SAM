@@ -29,7 +29,18 @@
 #define MAX_INI_COUNT (20)
 
 const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
+extern bool runtime_pos_log;
 
+Eigen::Quaterniond  Euler2Quat(float roll_, float pitch_, float yaw_)
+{
+    Eigen::Quaterniond q ;            //   四元数 q 和 -q 是相等的
+    Eigen::AngleAxisd roll(double(roll_), Eigen::Vector3d::UnitX());
+    Eigen::AngleAxisd pitch(double(pitch_), Eigen::Vector3d::UnitY());
+    Eigen::AngleAxisd yaw(double(yaw_), Eigen::Vector3d::UnitZ());
+    q = yaw * pitch * roll ;
+    q.normalize();
+    return q ;
+}
 /// *************IMU Process and undistortion
 class ImuProcess
 {
@@ -193,7 +204,10 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
   }
   state_ikfom init_state = kf_state.get_x(); // 初始状态量
   init_state.grav = S2(- mean_acc / mean_acc.norm() * G_m_s2); // - acc * (g / acc)，负值，根据加速度均值，重力模长做归一化，重力记为S2流形
-  
+  // float pitch = atan(mean_acc(0) / sqrt(mean_acc(1)*mean_acc(1) + mean_acc(2)*mean_acc(2)));
+  // float roll = atan2(mean_acc(1), mean_acc(2));
+  // std::cout << "roll: " << roll * 180 / 3.1415 << " pitch: " << pitch * 180 / 3.1415 << std::endl;
+  // init_state.rot = Euler2Quat(roll, pitch, 0);
   //state_inout.rot = Eye3d; // Exp(mean_acc.cross(V3D(0, 0, -1 / scale_gravity)));
   init_state.bg  = mean_gyr; // 初始化陀螺仪bias（初值？）为平均角速度
   init_state.offset_T_L_I = Lidar_T_wrt_IMU;        //   t_lidar_imu  translate外参
@@ -292,6 +306,14 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
     double &&offs_t = tail->header.stamp.toSec() - pcl_beg_time;//m+1时刻与lidar起始时刻时间差
     //保存帧内imu数据 m+1 时刻的pose、前一时刻与当前时刻imu数据的均值（w系）、v、p、r、
     IMUpose.push_back(set_pose6d(offs_t, acc_s_last, angvel_last, imu_state.vel, imu_state.pos, imu_state.rot.toRotationMatrix()));
+    if (runtime_pos_log) {
+      fout_imu << setw(10) << tail->header.stamp.toSec() << " " << imu_state.pos(0) << " " << imu_state.pos(1) << " " << imu_state.pos(2) << " " \
+               << imu_state.rot.w() << " " << imu_state.rot.x() << " " << imu_state.rot.y() << " " << imu_state.rot.z() << " " \
+               << imu_state.vel(0) << " " << imu_state.vel(1) << " " << imu_state.vel(2) << std::endl;
+      fout_imu << setw(10) << acc_s_last(0) << " " << acc_s_last(1) << " " << acc_s_last(2) << " " \
+               << acc_avr(0) << " " << acc_avr(1) << " " << acc_avr(2) << " " << angvel_last(0) << " " << angvel_last(1) << " " << angvel_last(2) << " " \
+               << imu_state.ba(0) << " " << imu_state.ba(1) << " " << imu_state.ba(2) << " " << imu_state.bg(0) << " " << imu_state.bg(1) << " " << imu_state.bg(2);
+    }
   }
 
   /*** calculated the pos and attitude prediction at the frame-end ***/
@@ -300,6 +322,14 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   kf_state.predict(dt, Q, in); // in 此时为最后一个imu数据，传播到lidar终点时刻与imu终点时刻较大者
   
   imu_state = kf_state.get_x();//lidar终点时刻与imu终点时刻较大者，imu位姿
+  if (runtime_pos_log) {
+    fout_imu << setw(10) << pcl_end_time << " " << imu_state.pos(0) << " " << imu_state.pos(1) << " " << imu_state.pos(2) << " " \
+              << imu_state.rot.w() << " " << imu_state.rot.x() << " " << imu_state.rot.y() << " " << imu_state.rot.z() << " " \
+              << imu_state.vel(0) << " " << imu_state.vel(1) << " " << imu_state.vel(2) << std::endl;
+    fout_imu << setw(10) << acc_s_last(0) << " " << acc_s_last(1) << " " << acc_s_last(2) << " " \
+              << acc_avr(0) << " " << acc_avr(1) << " " << acc_avr(2) << " " << angvel_last(0) << " " << angvel_last(1) << " " << angvel_last(2) << " " \
+              << imu_state.ba(0) << " " << imu_state.ba(1) << " " << imu_state.ba(2) << " " << imu_state.bg(0) << " " << imu_state.bg(1) << " " << imu_state.bg(2);
+  }
   last_imu_ = meas.imu.back(); //记录最后一个imu数据为上一imu数据，用于下一次imu前向传播的开头
   last_lidar_end_time_ = pcl_end_time;//记录点云结束时间为上一帧结束时间
 
